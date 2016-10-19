@@ -97,7 +97,94 @@ static int make_socket_non_blocking(int sfd)
     return 0;
 }
 
-static void accept_new_connections(int epoll_fd, int listening_socket_fd) {
+typedef struct socket_with_msg {
+    struct socket_with_msg *next;
+    int socket_fd;
+    char buff[MAX_MESSAGE_LENGTH * 2]; // to be able to concat string without additional fuss
+    size_t buff_size; // current buff size, not null-terminated!
+} socket_with_msg;
+
+static void add_socket(socket_with_msg **root, int socket_fd)
+{
+    socket_with_msg *new_node;
+    new_node = (socket_with_msg*)malloc(sizeof(socket_with_msg));
+    new_node->socket_fd = socket_fd;
+    new_node->buff_size = 0;
+    new_node->next = *root;
+    *root = new_node;
+}
+
+static void remove_socket(socket_with_msg **root, int socket_fd)
+{
+    // no elements
+    if (*root == NULL)
+    {
+        printf("an attempt to remove from empty list\n");
+    }
+
+    socket_with_msg *previous = *root;
+    socket_with_msg *next = previous->next;
+
+    // first element needs to be removed
+    if (previous->socket_fd == socket_fd)
+    {
+        free(previous);
+        *root = next;
+        printf("socked removed form list\n");
+        return;
+    }
+
+    // ok, it is in the middle
+    while (next)
+    {
+        if (next->socket_fd == socket_fd)
+        {
+            previous->next = next->next;
+            free(next);
+            printf("socked removed form list\n");
+            return;
+        }
+        previous = next;
+        next = next->next;
+    }
+    printf("socket for removing not found\n");
+}
+
+static socket_with_msg* find_socket(socket_with_msg *root, int fd) {
+    socket_with_msg *current = root;
+    while (current)
+    {
+        if (current->socket_fd == fd)
+            return current;
+        current = current->next;
+    }
+    printf("socket not found, returning null");
+    return NULL;
+}
+
+static int socket_add_to_buf(socket_with_msg *sock_m, char *buf, size_t size)
+{
+    if (size + sock_m->buff_size > 2 * MAX_MESSAGE_LENGTH)
+    {
+        fprintf(stderr, "Attempt to add too big buffer");
+        return -1;
+    }
+    memcpy(sock_m->buff + sock_m->buff_size, buf, size);
+    sock_m->buff_size += size;
+    return 0;
+}
+
+static void print_sockets(socket_with_msg *root)
+{
+    socket_with_msg *current = root;
+    while (current) {
+        printf("Socket %d, msg size %d; ", current->socket_fd, (int)current->buff_size);
+        current = current->next;
+    }
+    printf("\n");
+}
+
+static void accept_new_connections(int epoll_fd, int listening_socket_fd, socket_with_msg **sockets_with_msg) {
     while (1948) {
         struct sockaddr in_addr; // where to put incoming connection endpoint
         socklen_t in_len = sizeof(in_addr); // it's length
@@ -120,11 +207,11 @@ static void accept_new_connections(int epoll_fd, int listening_socket_fd) {
             }
         }
 
-
-        if (int err = getnameinfo(&in_addr, in_len,
+        int err;
+        if ((err = getnameinfo(&in_addr, in_len,
                         hbuf, sizeof(hbuf), // hostname will be put there
                         sbuf, sizeof(sbuf), // service address will be put there
-                        NI_NUMERICHOST | NI_NUMERICSERV) // don't resolve hostname and service address
+                        NI_NUMERICHOST | NI_NUMERICSERV)) // don't resolve hostname and service address
             == 0)
         {
             printf("Accepted connection on descriptor %d "
@@ -148,52 +235,90 @@ static void accept_new_connections(int epoll_fd, int listening_socket_fd) {
             perror("epoll_ctl while adding incoming connection");
             break;
         }
+        add_socket(sockets_with_msg, incoming_fd);
+        printf("______________printing all incoming sockets____________________\n");
+        print_sockets(*sockets_with_msg);
     }
 }
 
-static void receive_data(int fd_to_read)
+static void send_message(int fd, char *msg, size_t msg_size)
+{
+    printf("TODO: send the message, for now printing it\n");
+    printf("Message from fd %d:\n", fd);
+    if (write(1, msg, msg_size) == -1)
+    {
+        perror("error while writing to stdout");
+    }
+}
+
+// send every '\n' terminating string found in sock_m's buffer
+static void send_messages_from_socket(socket_with_msg *sock_m)
+{
+    char *msg_start = sock_m->buff;
+    size_t msg_size = 0;
+    size_t full_buff_size = sock_m->buff_size;
+
+    for (size_t i = 0; i < full_buff_size; i++)
+    {
+        if (msg_start[msg_size] == '\n')
+        {
+            // found message
+            printf("found message\n");
+            send_message(sock_m->socket_fd, msg_start, msg_size + 1);
+            memmove(sock_m->buff, sock_m->buff + msg_size + 1, sock_m->buff_size - msg_size - 1);
+            sock_m->buff_size -= msg_size + 1;
+            msg_start = sock_m->buff;
+            msg_size =  0;
+        }
+        else
+            msg_size++;
+    }
+
+    // TODO: add check if more than MAX_MESSAGE bytes left
+}
+
+static void receive_data(int fd_to_read, socket_with_msg **sockets_with_msg)
 {
     int close_connection = 0; // true, if this connection is closed
-    ssize_t count; // bytes read
-    char buf[MAX_MESSAGE_LENGTH];
 
-    count = read(fd_to_read, buf, sizeof(buf));
-    if (count == -1)
+    while (1948)
     {
-        if (errno == EAGAIN)
+        char buf[MAX_MESSAGE_LENGTH]; // put message on this iteration here
+        ssize_t count; // bytes read on this iteration
+
+        // -1 because of \0
+        count = read(fd_to_read, buf, sizeof(buf) - 1);
+        if (count == -1)
         {
-            printf("Suddenly all the data is read");
-            return;
+            if (errno == EAGAIN)
+            {
+                printf("All the data is read for now, returning to epoll_wait");
+            }
+            else
+            {
+                perror("error while reading, closing connection");
+                close_connection = 1;
+            }
+            break;
+        }
+        else if (count == 0)
+        {
+            printf("EOF on fd %d, closing connection\n", fd_to_read);
+            close_connection = 1;
+            break;
         }
         else
         {
-            perror("error while reading, closing connections");
-            close_connection = 1;
+            socket_with_msg *soc_m = find_socket(*sockets_with_msg, fd_to_read);
+            socket_add_to_buf(soc_m, buf, count);
+            send_messages_from_socket(soc_m);
         }
-    }
-    else if (count == 0)
-    {
-        printf("EOF on fd %d, closing connection\n", fd_to_read);
-        close_connection = 1;
-    }
-    else
-    {
-        printf("TODO: send the message, for now printing it\n");
-        printf("Message from fd %d:\n", fd_to_read);
-        if (write(1, buf, count) == -1)
-        {
-            perror("error while writing to stdout");
-        }
-    }
-
-    // check for EOF
-    if ((recv(fd_to_read, buf, sizeof(buf), MSG_PEEK | MSG_DONTWAIT)) == 0) {
-        close_connection = 1;
     }
 
     if (close_connection)
     {
         printf("Closed connection on descriptor %d\n", fd_to_read);
+        remove_socket(sockets_with_msg, fd_to_read);
         close(fd_to_read);
     }
 }
@@ -201,7 +326,9 @@ static void receive_data(int fd_to_read)
 static void event_loop(int epoll_fd, int listening_socket_fd)
 {
     // buffer where events are returned from epoll
-    struct epoll_event *events = (epoll_event*)calloc(MAXEVENTS, sizeof(struct epoll_event));
+    struct epoll_event *events = (struct epoll_event*)calloc(MAXEVENTS, sizeof(struct epoll_event));
+    socket_with_msg *sockets_with_msg = NULL; // socket fds with accumulated msgs
+    int end_of_world = 0;
     while (1948)
     {
         // block until at least one event arrive
@@ -221,16 +348,18 @@ static void event_loop(int epoll_fd, int listening_socket_fd)
             else if (listening_socket_fd == events[i].data.fd)
             {
                 printf("Notification on listening socket; starting accepting connections\n");
-                accept_new_connections(epoll_fd, listening_socket_fd);
+                accept_new_connections(epoll_fd, listening_socket_fd, &sockets_with_msg);
             }
 
             else
             {
                 int fd_to_read = events[i].data.fd;
                 printf("Receiving data from descriptor %d\n", fd_to_read);
-                receive_data(fd_to_read);
+                receive_data(fd_to_read, &sockets_with_msg);
             }
         }
+        if (end_of_world) // just to suppress infinite loop warning
+            break;
     }
 }
 
