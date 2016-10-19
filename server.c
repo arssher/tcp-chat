@@ -130,7 +130,7 @@ static void remove_socket(socket_with_msg **root, int socket_fd)
     {
         free(previous);
         *root = next;
-        printf("socked removed form list\n");
+        printf("socked removed from list\n");
         return;
     }
 
@@ -243,7 +243,6 @@ static void accept_new_connections(int epoll_fd, int listening_socket_fd, socket
 
 static void send_message(int fd, char *msg, size_t msg_size)
 {
-    printf("TODO: send the message, for now printing it\n");
     printf("Message from fd %d:\n", fd);
     if (write(1, msg, msg_size) == -1)
     {
@@ -263,7 +262,6 @@ static void send_messages_from_socket(socket_with_msg *sock_m)
         if (msg_start[msg_size] == '\n')
         {
             // found message
-            printf("found message\n");
             send_message(sock_m->socket_fd, msg_start, msg_size + 1);
             memmove(sock_m->buff, sock_m->buff + msg_size + 1, sock_m->buff_size - msg_size - 1);
             sock_m->buff_size -= msg_size + 1;
@@ -274,12 +272,13 @@ static void send_messages_from_socket(socket_with_msg *sock_m)
             msg_size++;
     }
 
-    // TODO: add check if more than MAX_MESSAGE bytes left
+    // TODO: add check if more than MAX_MESSAGE bytes left and reset sock_m if that the case
 }
 
 static void receive_data(int fd_to_read, socket_with_msg **sockets_with_msg)
 {
     int close_connection = 0; // true, if this connection is closed
+    socket_with_msg *sock_m = find_socket(*sockets_with_msg, fd_to_read);
 
     while (1948)
     {
@@ -309,17 +308,22 @@ static void receive_data(int fd_to_read, socket_with_msg **sockets_with_msg)
         }
         else
         {
-            socket_with_msg *soc_m = find_socket(*sockets_with_msg, fd_to_read);
-            socket_add_to_buf(soc_m, buf, count);
-            send_messages_from_socket(soc_m);
+            socket_add_to_buf(sock_m, buf, count);
+            send_messages_from_socket(sock_m);
         }
     }
 
     if (close_connection)
     {
-        printf("Closed connection on descriptor %d\n", fd_to_read);
+        // send rest of the data, if anything left
+        if (sock_m->buff_size != 0)
+        {
+            send_message(sock_m->socket_fd, sock_m->buff, sock_m->buff_size);
+        }
+        // now close the socket
         remove_socket(sockets_with_msg, fd_to_read);
         close(fd_to_read);
+        printf("Closed connection on descriptor %d\n", fd_to_read);
     }
 }
 
