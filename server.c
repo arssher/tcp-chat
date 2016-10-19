@@ -241,17 +241,52 @@ static void accept_new_connections(int epoll_fd, int listening_socket_fd, socket
     }
 }
 
-static void send_message(int fd, char *msg, size_t msg_size)
+static void send_message(int fd, char *msg, size_t msg_size, socket_with_msg *sockets_with_msg)
 {
     printf("Message from fd %d:\n", fd);
     if (write(1, msg, msg_size) == -1)
     {
         perror("error while writing to stdout");
     }
+    printf("now let's send it to all the clients\n");
+    // TODO: rewrite in non-blocking regime
+    socket_with_msg *current = sockets_with_msg;
+    while (current)
+    {
+        size_t bytes_sent = 0;
+        char *msg_start = msg;
+        size_t msg_size_left = msg_size;
+        while (bytes_sent != msg_size)
+        {
+            ssize_t count = write(current->socket_fd, msg_start, msg_size_left);
+            if (count == -1)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    fprintf(stderr, "buffer is busy, trying again\n");
+                    continue;
+                }
+                else
+                {
+                    fprintf(stderr, "something nasty happened while writing to client, ignoring it\n");
+                    break;
+                }
+            }
+            else
+            {
+                bytes_sent += count;
+                msg_start += count;
+                msg_size_left -= count;
+            }
+
+        }
+        printf("if you don't see errors above, message was sent successfully\n");
+        current = current->next;
+    }
 }
 
 // send every '\n' terminating string found in sock_m's buffer
-static void send_messages_from_socket(socket_with_msg *sock_m)
+static void send_messages_from_socket(socket_with_msg *sock_m, socket_with_msg *sockets_with_msg)
 {
     char *msg_start = sock_m->buff;
     size_t msg_size = 0;
@@ -262,7 +297,7 @@ static void send_messages_from_socket(socket_with_msg *sock_m)
         if (msg_start[msg_size] == '\n')
         {
             // found message
-            send_message(sock_m->socket_fd, msg_start, msg_size + 1);
+            send_message(sock_m->socket_fd, msg_start, msg_size + 1, sockets_with_msg);
             memmove(sock_m->buff, sock_m->buff + msg_size + 1, sock_m->buff_size - msg_size - 1);
             sock_m->buff_size -= msg_size + 1;
             msg_start = sock_m->buff;
@@ -308,8 +343,9 @@ static void receive_data(int fd_to_read, socket_with_msg **sockets_with_msg)
         }
         else
         {
+            // data arrived, add it to our buffer and send messages
             socket_add_to_buf(sock_m, buf, count);
-            send_messages_from_socket(sock_m);
+            send_messages_from_socket(sock_m, *sockets_with_msg);
         }
     }
 
@@ -318,7 +354,7 @@ static void receive_data(int fd_to_read, socket_with_msg **sockets_with_msg)
         // send rest of the data, if anything left
         if (sock_m->buff_size != 0)
         {
-            send_message(sock_m->socket_fd, sock_m->buff, sock_m->buff_size);
+            send_message(sock_m->socket_fd, sock_m->buff, sock_m->buff_size, *sockets_with_msg);
         }
         // now close the socket
         remove_socket(sockets_with_msg, fd_to_read);
