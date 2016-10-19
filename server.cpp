@@ -186,6 +186,11 @@ static void receive_data(int fd_to_read)
         }
     }
 
+    // check for EOF
+    if ((recv(fd_to_read, buf, sizeof(buf), MSG_PEEK | MSG_DONTWAIT)) == 0) {
+        close_connection = 1;
+    }
+
     if (close_connection)
     {
         printf("Closed connection on descriptor %d\n", fd_to_read);
